@@ -60,24 +60,82 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
 
-export async function POST(request: Request) {
-  const body = await request.json();
+function safeJsonParse(value: any) {
+  if (!value) return {};
 
-  console.log("VAPI BODY:", body);
+  if (typeof value === "object") {
+    return value;
+  }
 
-  const data =
-    body?.message?.toolCallList?.[0]?.function?.arguments || body;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
 
-  const {
-    role,
-    level,
-    techstack,
-    amount,
-    type,
-    userid,
-  } = data;
+  return {};
+}
 
+function normalizeTechstack(techstack: any): string[] {
+  if (Array.isArray(techstack)) {
+    return techstack.map((t) => String(t).trim()).filter(Boolean);
+  }
+
+  if (typeof techstack === "string") {
+    return techstack
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function extractJsonArray(text: string): string[] {
   try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\[[\s\S]*\]/);
+
+    if (!match) {
+      throw new Error("Groq did not return a valid JSON array");
+    }
+
+    return JSON.parse(match[0]);
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+
+    console.log("VAPI BODY:", JSON.stringify(body, null, 2));
+
+    const toolCalls =
+      body?.message?.toolCallList ||
+      body?.message?.toolCalls ||
+      [];
+
+    const toolCallId = toolCalls?.[0]?.id;
+
+    const rawArgs =
+      toolCalls?.[0]?.function?.arguments ||
+      body;
+
+    const data = safeJsonParse(rawArgs);
+
+    const role = data.role || "Software Developer";
+    const level = data.level || "entry";
+    const techstackRaw = data.techstack || "JavaScript, Node.js";
+    const amount = Number(data.amount) || 5;
+    const type = data.type || "technical";
+    const userid = data.userid || data.userId || "anonymous-user";
+
+    const techstackArray = normalizeTechstack(techstackRaw);
+    const techstackText = techstackArray.join(", ");
+
     const completion = await groq.chat.completions.create({
       model: "llama-3.1-8b-instant",
       messages: [
@@ -87,13 +145,13 @@ export async function POST(request: Request) {
 
 Role: ${role}
 Level: ${level}
-Tech stack: ${techstack}
+Tech stack: ${techstackText}
 Focus: ${type}
 
 Return ONLY a valid JSON array like:
 ["Question 1", "Question 2", "Question 3"]
 
-No explanation. No extra text.`,
+No markdown. No explanation. No extra text.`,
         },
       ],
       temperature: 0.5,
@@ -103,15 +161,13 @@ No explanation. No extra text.`,
 
     console.log("GROQ RESPONSE:", text);
 
-    const questions = JSON.parse(text);
+    const questions = extractJsonArray(text);
 
     const interview = {
       role,
       type,
       level,
-      techstack: techstack
-        .split(",")
-        .map((t: string) => t.trim()),
+      techstack: techstackArray,
       questions,
       userId: userid,
       finalized: true,
@@ -119,16 +175,46 @@ No explanation. No extra text.`,
       createdAt: new Date().toISOString(),
     };
 
-    await db.collection("interviews").add(interview);
+    const docRef = await db.collection("interviews").add(interview);
 
+    /**
+     * This part is important for Vapi.
+     * If this request came from a Vapi tool call,
+     * return results with toolCallId.
+     */
+    if (toolCallId) {
+      return Response.json(
+        {
+          results: [
+            {
+              toolCallId,
+              result: `Interview questions generated successfully.
+
+Interview ID: ${docRef.id}
+
+Here are the questions:
+
+${questions.map((q: string, i: number) => `${i + 1}. ${q}`).join("\n")}
+
+Now start the interview. Ask question 1 only.`,
+            },
+          ],
+        },
+        { status: 200 }
+      );
+    }
+
+    /**
+     * This fallback is for Postman/browser/local testing.
+     */
     return Response.json(
       {
         success: true,
+        interviewId: docRef.id,
         questions,
       },
       { status: 200 }
     );
-
   } catch (error: any) {
     console.error("❌ Full Error:", error);
 

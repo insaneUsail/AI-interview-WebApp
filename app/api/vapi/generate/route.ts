@@ -61,11 +61,25 @@ const groq = new Groq({
 });
 
 export async function POST(request: Request) {
-  const { type, role, level, techstack, amount, userid } = await request.json();
+  const body = await request.json();
+
+  console.log("VAPI BODY:", body);
+
+  const data =
+    body?.message?.toolCallList?.[0]?.function?.arguments || body;
+
+  const {
+    role,
+    level,
+    techstack,
+    amount,
+    type,
+    userid,
+  } = data;
 
   try {
     const completion = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant", // safer model
+      model: "llama-3.1-8b-instant",
       messages: [
         {
           role: "user",
@@ -87,6 +101,7 @@ No explanation. No extra text.`,
 
     const text = completion.choices[0]?.message?.content || "";
 
+    console.log("GROQ RESPONSE:", text);
 
     const questions = JSON.parse(text);
 
@@ -94,7 +109,9 @@ No explanation. No extra text.`,
       role,
       type,
       level,
-      techstack: techstack.split(",").map((t: string) => t.trim()),
+      techstack: techstack
+        .split(",")
+        .map((t: string) => t.trim()),
       questions,
       userId: userid,
       finalized: true,
@@ -104,7 +121,13 @@ No explanation. No extra text.`,
 
     await db.collection("interviews").add(interview);
 
-    return Response.json({ success: true }, { status: 200 });
+    return Response.json(
+      {
+        success: true,
+        questions,
+      },
+      { status: 200 }
+    );
 
   } catch (error: any) {
     console.error("❌ Full Error:", error);
@@ -113,7 +136,6 @@ No explanation. No extra text.`,
       {
         success: false,
         error: error?.message || "Unknown error",
-        details: error,
       },
       { status: 500 }
     );
@@ -122,7 +144,10 @@ No explanation. No extra text.`,
 
 export async function GET() {
   return Response.json(
-    { success: true, data: "Groq API working" },
+    {
+      success: true,
+      data: "Groq API working",
+    },
     { status: 200 }
   );
 }

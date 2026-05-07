@@ -6,6 +6,27 @@ import { google } from "@ai-sdk/google";
 import { db } from "@/firebase/admin";
 import { feedbackSchema } from "@/constants";
 
+import Groq from "groq-sdk";
+
+
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
+
+function extractJson(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+
+    if (!match) {
+      throw new Error("No valid JSON found in response");
+    }
+
+    return JSON.parse(match[0]);
+  }
+}
+
 export async function createFeedback(params: CreateFeedbackParams) {
   const { interviewId, userId, transcript, feedbackId } = params;
 
@@ -17,35 +38,98 @@ export async function createFeedback(params: CreateFeedbackParams) {
       )
       .join("");
 
-    const { object } = await generateObject({
-      model: google("gemini-2.0-flash-001", {
-        structuredOutputs: false,
-      }),
-      schema: feedbackSchema,
-      prompt: `
-        You are an AI interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories. Be thorough and detailed in your analysis. Don't be lenient with the candidate. If there are mistakes or areas for improvement, point them out.
-        Transcript:
-        ${formattedTranscript}
+    console.log("FORMATTED TRANSCRIPT:", formattedTranscript);
 
-        Please score the candidate from 0 to 100 in the following areas. Do not add categories other than the ones provided:
-        - **Communication Skills**: Clarity, articulation, structured responses.
-        - **Technical Knowledge**: Understanding of key concepts for the role.
-        - **Problem-Solving**: Ability to analyze problems and propose solutions.
-        - **Cultural & Role Fit**: Alignment with company values and job role.
-        - **Confidence & Clarity**: Confidence in responses, engagement, and clarity.
-        `,
-      system:
-        "You are a professional interviewer analyzing a mock interview. Your task is to evaluate the candidate based on structured categories",
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.1-8b-instant",
+
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a professional AI interviewer. Return ONLY valid JSON. No markdown. No explanation.",
+        },
+
+        {
+          role: "user",
+          content: `
+Analyze this mock interview transcript carefully.
+
+Transcript:
+${formattedTranscript}
+
+Return ONLY valid JSON in this exact format:
+
+{
+  "totalScore": 75,
+  "categoryScores": [
+    {
+      "name": "Communication Skills",
+      "score": 80,
+      "comment": "Candidate communicated clearly with structured responses."
+    },
+    {
+      "name": "Technical Knowledge",
+      "score": 70,
+      "comment": "Candidate showed moderate technical understanding."
+    },
+    {
+      "name": "Problem-Solving",
+      "score": 72,
+      "comment": "Candidate approached problems logically."
+    },
+    {
+      "name": "Cultural & Role Fit",
+      "score": 78,
+      "comment": "Candidate aligns reasonably well with the role."
+    },
+    {
+      "name": "Confidence & Clarity",
+      "score": 74,
+      "comment": "Candidate sounded fairly confident."
+    }
+  ],
+  "strengths": [
+    "Clear communication",
+    "Good understanding of concepts"
+  ],
+  "areasForImprovement": [
+    "Need deeper technical explanations",
+    "Use more real-world examples"
+  ],
+  "finalAssessment": "The candidate performed reasonably well overall but should improve technical depth and practical examples."
+}
+
+Do not include markdown.
+Do not include explanation.
+Return ONLY JSON.
+`,
+        },
+      ],
+
+      temperature: 0.4,
     });
 
+    const text = completion.choices[0]?.message?.content || "";
+
+    console.log("GROQ FEEDBACK RESPONSE:", text);
+
+    const object = extractJson(text);
+
     const feedback = {
-      interviewId: interviewId,
-      userId: userId,
+      interviewId,
+      userId,
+
       totalScore: object.totalScore,
+
       categoryScores: object.categoryScores,
+
       strengths: object.strengths,
+
       areasForImprovement: object.areasForImprovement,
+
       finalAssessment: object.finalAssessment,
+
       createdAt: new Date().toISOString(),
     };
 
@@ -59,10 +143,18 @@ export async function createFeedback(params: CreateFeedbackParams) {
 
     await feedbackRef.set(feedback);
 
-    return { success: true, feedbackId: feedbackRef.id };
+    console.log("FEEDBACK SAVED SUCCESSFULLY");
+
+    return {
+      success: true,
+      feedbackId: feedbackRef.id,
+    };
   } catch (error) {
-    console.error("Error saving feedback:", error);
-    return { success: false };
+    console.error("ERROR SAVING FEEDBACK:", error);
+
+    return {
+      success: false,
+    };
   }
 }
 
